@@ -228,11 +228,12 @@ app.post('/api/products',checkAdmin,async(req,res)=>{
 app.patch('/api/products/:id',checkAdmin,async(req,res)=>{
   const p=store.products.find(p=>p.id===req.params.id);
   if(!p) return res.status(404).json({error:'없음'});
-  const {coupangUrl,manualPrice,origPrice,name,brand}=req.body;
+  const {coupangUrl,manualPrice,origPrice,name,brand,imageUrl:manualImageUrl}=req.body;
   if(coupangUrl!==undefined)p.coupangUrl=coupangUrl;
   if(origPrice!==undefined)p.origPrice=origPrice;
   if(name!==undefined)p.name=name;
   if(brand!==undefined)p.brand=brand;
+  if(manualImageUrl)p.imageUrl=manualImageUrl;
   if(manualPrice&&parseInt(manualPrice)>0){if(!store.priceHistory[p.id])store.priceHistory[p.id]=[];store.priceHistory[p.id].push({price:parseInt(manualPrice),ts:Date.now(),source:'manual'});}
   let fetchedPrice=null;
   if(coupangUrl){try{const i=await fetchCoupangInfo(coupangUrl);if(i.price){store.priceHistory[p.id].push({price:i.price,ts:Date.now(),source:'auto'});fetchedPrice=i.price;}if(i.imageUrl)p.imageUrl=i.imageUrl;}catch{}}

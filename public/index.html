@@ -837,6 +837,9 @@ function renderAdminRows() {
       <input class="adm-link-inp ${p.coupangUrl?'has-link':''}" type="url"
         placeholder="https://coupa.ng/..." value="${p.coupangUrl||''}"
         id="link-${p.id}" onchange="this.className='adm-link-inp'">
+      <input class="adm-link-inp" type="url" style="margin-top:4px;"
+        placeholder="이미지 URL (선택, 비우면 자동)" value="${p.imageUrl||''}"
+        id="img-${p.id}">
       <div style="display:flex;gap:6px;margin-top:6px;">
         <input class="adm-price-inp" type="number" placeholder="수동 가격 입력 (선택)" id="mprice-${p.id}" style="flex:1;">
         <button class="adm-save-btn" onclick="saveProductLink('${p.id}')">저장</button>
@@ -853,9 +856,11 @@ async function saveProductLink(id) {
   var statusEl = document.getElementById('status-'+id);
   statusEl.textContent = '저장 중...'; statusEl.style.color='var(--t2)';
 
+  var imgUrl = document.getElementById('img-'+id)?.value.trim();
   try {
     var body = { coupangUrl: url };
     if (mp) body.manualPrice = parseInt(mp);
+    if (imgUrl) body.imageUrl = imgUrl;
     var r = await fetch('/api/products/'+id, {
       method:'PATCH',
       headers:{'Content-Type':'application/json','x-admin-key':key},
