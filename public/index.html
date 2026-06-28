@@ -277,7 +277,7 @@ footer p{font-size:11px;color:var(--t3);line-height:1.7;}
   <div class="nav-logo"><span>🥩</span><span>프로틴 트래커</span><div class="live-dot"></div></div>
   <div class="nav-right">
     <span class="nav-update" id="nav-update"></span>
-    <button class="admin-btn" onclick="openAdmin()">⚙ 관리</button>
+    <button class="admin-btn" id="admin-btn" onclick="openAdmin()" style="display:none">⚙ 관리</button>
   </div>
 </nav>
 
@@ -955,6 +955,11 @@ function showToast(msg) {
 // ══════════════════════════════════════════
 document.addEventListener('keydown', e=>{
   if(e.key==='Escape'){ closeModal(); closeAdmin(); }
+  // 관리 버튼: Ctrl+Shift+A (관리자만 알고 있음)
+  if(e.ctrlKey && e.shiftKey && e.key==='A'){
+    const btn = document.getElementById('admin-btn');
+    btn.style.display = btn.style.display==='none' ? '' : 'none';
+  }
 });
 
 // ══════════════════════════════════════════
