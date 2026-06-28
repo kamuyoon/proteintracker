@@ -1,0 +1,8 @@
+[phases.setup]
+aptPkgs = ["python3", "make", "gcc", "g++", "libsqlite3-dev"]
+
+[phases.build]
+cmds = ["npm install"]
+
+[start]
+cmd = "node server.js"
