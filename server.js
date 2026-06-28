@@ -1,5 +1,4 @@
-// 프로틴 트래커 서버 — 순수 JS, 네이티브 모듈 0개
-// Node.js 18 내장 fetch 사용 (별도 패키지 불필요)
+// 프로틴 트래커 서버 — 오직 Node.js 내장 모듈만 사용
 const express     = require('express');
 const cheerio     = require('cheerio');
 const cron        = require('node-cron');
@@ -9,6 +8,8 @@ const compression = require('compression');
 const rateLimit   = require('express-rate-limit');
 const path        = require('path');
 const fs          = require('fs');
+const https       = require('https');
+const http        = require('http');
 const { v4: uuidv4 } = require('uuid');
 
 const PORT      = process.env.PORT      || 3000;
@@ -21,22 +22,21 @@ let store = { products: [], priceHistory: {}, updateLog: [] };
 
 function loadData() {
   try {
-    const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     store.products     = parsed.products     || [];
     store.priceHistory = parsed.priceHistory || {};
     store.updateLog    = parsed.updateLog    || [];
-  } catch { /* 첫 실행시 기본값 */ }
+  } catch {}
 }
 
 function saveData() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8'); } catch(e) { console.error('[SAVE]', e.message); }
 }
 
 const DEFAULTS = [
   {id:'c1',category:'chicken',emoji:'🍗',brand:'하림',   name:'무항생제 닭가슴살',   weight:'1kg',  baseWeight:1000,origPrice:12000},
-  {id:'c2',category:'chicken',emoji:'🍗',brand:'올품',   name:'냉동 닭안심',         weight:'500g', baseWeight:500, origPrice:7500 },
-  {id:'c3',category:'chicken',emoji:'🍗',brand:'참프레', name:'생 닭다리살',         weight:'1kg',  baseWeight:1000,origPrice:9000 },
+  {id:'c2',category:'chicken',emoji:'🍗',brand:'올품',   name:'냉동 닭안심',         weight:'500g', baseWeight:500, origPrice:7500},
+  {id:'c3',category:'chicken',emoji:'🍗',brand:'참프레', name:'생 닭다리살',         weight:'1kg',  baseWeight:1000,origPrice:9000},
   {id:'p1',category:'pork',   emoji:'🥩',brand:'도드람', name:'국내산 삼겹살',       weight:'500g', baseWeight:500, origPrice:16000},
   {id:'p2',category:'pork',   emoji:'🥩',brand:'한돈',   name:'앞다리살 불고기용',   weight:'1kg',  baseWeight:1000,origPrice:13500},
   {id:'p3',category:'pork',   emoji:'🥩',brand:'도드람', name:'목살 제육용',         weight:'1kg',  baseWeight:1000,origPrice:15000},
@@ -55,8 +55,7 @@ function seedDefaults() {
   let changed = false;
   for (const d of DEFAULTS) {
     if (!store.products.find(p => p.id === d.id)) {
-      store.products.push({ ...d, coupangUrl:'', imageUrl:'', isActive:true,
-        createdAt:Date.now(), updatedAt:Date.now() });
+      store.products.push({ ...d, coupangUrl:'', imageUrl:'', isActive:true, createdAt:Date.now(), updatedAt:Date.now() });
       store.priceHistory[d.id] = [];
       changed = true;
     }
@@ -64,21 +63,44 @@ function seedDefaults() {
   if (changed) saveData();
 }
 
-// ─── HTTP 헬퍼 (Node 18 내장 fetch) ───────────────────────────
+// ─── HTTP 클라이언트 (https/http 내장 모듈만) ─────────────────
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 
-async function httpGet(url) {
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': UA,
-      'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-      'Accept-Language': 'ko-KR,ko;q=0.9',
-      'Referer': 'https://www.coupang.com/',
-    },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(15000),
+function httpGet(url, redirectsLeft = 6) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(url); } catch(e) { return reject(new Error('Invalid URL: ' + url)); }
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const options = {
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': UA,
+        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9',
+        'Referer': 'https://www.coupang.com/',
+      },
+      timeout: 15000
+    };
+    const req = lib.request(options, res => {
+      if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location && redirectsLeft > 0) {
+        const next = res.headers.location.startsWith('http')
+          ? res.headers.location
+          : `${parsed.protocol}//${parsed.hostname}${res.headers.location}`;
+        res.resume();
+        return resolve(httpGet(next, redirectsLeft - 1));
+      }
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve({ text: data, url }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    req.end();
   });
-  return { text: await res.text(), url: res.url };
 }
 
 async function fetchCoupangInfo(url) {
@@ -89,37 +111,30 @@ async function fetchCoupangInfo(url) {
   $('script[type="application/ld+json"]').each((_, el) => {
     if (price) return;
     try {
-      const d = JSON.parse($(el).html());
-      const items = Array.isArray(d) ? d : [d];
+      const items = [].concat(JSON.parse($(el).html()));
       items.forEach(item => {
         if (item['@type'] === 'Product') {
           if (item.offers?.price) price = parseInt(String(item.offers.price).replace(/[^0-9]/g,''));
           if (!name && item.name) name = item.name;
-          if (!imageUrl) imageUrl = Array.isArray(item.image) ? item.image[0] : item.image;
+          if (!imageUrl) imageUrl = [].concat(item.image||[])[0];
         }
       });
     } catch {}
   });
-  if (!price) {
-    const og = $('meta[property="product:price:amount"]').attr('content');
-    if (og) price = parseInt(og.replace(/[^0-9]/g,''));
-  }
-  if (!name) name = ($('meta[property="og:title"]').attr('content') || $('title').text()).split(/[-–|]/)[0].trim();
+  if (!price) { const v=$('meta[property="product:price:amount"]').attr('content'); if(v) price=parseInt(v.replace(/[^0-9]/g,'')); }
+  if (!name)  name = ($('meta[property="og:title"]').attr('content')||$('title').text()||'').split(/[-–|]/)[0].trim();
   if (!imageUrl) imageUrl = $('meta[property="og:image"]').attr('content');
   if (!price) {
     for (const sel of ['.prod-price .total-price strong','#productPrice','.price-wrap strong']) {
-      const txt = $(sel).first().text().replace(/[^0-9]/g,'');
-      if (txt && parseInt(txt) > 100) { price = parseInt(txt); break; }
+      const t=$(sel).first().text().replace(/[^0-9]/g,'');
+      if (t && parseInt(t)>100) { price=parseInt(t); break; }
     }
   }
-  if (!price) {
-    const m = html.match(/"price"\s*:\s*"?(\d{3,7})"?/);
-    if (m) price = parseInt(m[1]);
-  }
+  if (!price) { const m=html.match(/"price"\s*:\s*"?(\d{3,7})"?/); if(m) price=parseInt(m[1]); }
   return { price, name: name?.substring(0,100), imageUrl, finalUrl };
 }
 
-// ─── 전체 가격 업데이트 ────────────────────────────────────────
+// ─── 가격 업데이트 ─────────────────────────────────────────────
 async function updateAllPrices(triggeredBy = 'cron') {
   const linked = store.products.filter(p => p.isActive && p.coupangUrl);
   if (!linked.length) return { success:0, failed:0 };
@@ -133,21 +148,19 @@ async function updateAllPrices(triggeredBy = 'cron') {
         if (!store.priceHistory[p.id]) store.priceHistory[p.id] = [];
         store.priceHistory[p.id].push({ price:info.price, ts:Date.now(), source:triggeredBy });
         if (store.priceHistory[p.id].length > 180) store.priceHistory[p.id] = store.priceHistory[p.id].slice(-180);
-        p.updatedAt = Date.now();
-        log.success++;
+        p.updatedAt = Date.now(); log.success++;
         console.log(`[OK] ${p.name}: ${info.price.toLocaleString()}원`);
-      } else { log.failed++; }
+      } else log.failed++;
     } catch(e) { log.failed++; console.error(`[ERR] ${p.name}:`, e.message); }
     await new Promise(r => setTimeout(r, 2000 + Math.random()*2000));
   }
-  log.finished = Date.now();
-  saveData();
+  log.finished = Date.now(); saveData();
   return { success:log.success, failed:log.failed };
 }
 
 cron.schedule('0 */2 * * *', () => updateAllPrices('auto-cron'));
 
-// ─── Express 앱 ───────────────────────────────────────────────
+// ─── Express ──────────────────────────────────────────────────
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors(), compression(), helmet({ contentSecurityPolicy:false }), express.json());
@@ -161,125 +174,93 @@ const checkAdmin = (req,res,next) => {
 };
 
 function buildProduct(p) {
-  const hist  = (store.priceHistory[p.id]||[]).slice(-90);
-  const prices = hist.map(h => h.price);
-  const cur   = prices.length ? prices[prices.length-1] : null;
+  const prices = (store.priceHistory[p.id]||[]).slice(-90).map(h=>h.price);
+  const cur = prices.length ? prices[prices.length-1] : null;
   let stats = null;
   if (prices.length >= 2) {
     const mn=Math.min(...prices), mx=Math.max(...prices);
     const avg=Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);
     const pct=mx===mn?50:Math.round((cur-mn)/(mx-mn)*100);
     const r7=prices.slice(-7);
-    stats = { min90:mn, max90:mx, avg90:avg,
-      percentile:Math.max(0,Math.min(100,pct)),
-      weekDiff:r7.length>=2?r7[r7.length-1]-r7[0]:0 };
+    stats={ min90:mn, max90:mx, avg90:avg, percentile:Math.max(0,Math.min(100,pct)), weekDiff:r7.length>=2?r7[r7.length-1]-r7[0]:0 };
   }
-  return {
-    id:p.id, category:p.category, emoji:p.emoji, brand:p.brand,
-    name:p.name, weight:p.weight, baseWeight:p.baseWeight, origPrice:p.origPrice,
+  return { id:p.id, category:p.category, emoji:p.emoji, brand:p.brand, name:p.name,
+    weight:p.weight, baseWeight:p.baseWeight, origPrice:p.origPrice,
     coupangUrl:p.coupangUrl||'', imageUrl:p.imageUrl||'',
     currentPrice:cur, history:prices, stats,
     unit100:cur?Math.round(cur/p.baseWeight*100):null,
     dcRate:(cur&&p.origPrice)?Math.max(0,Math.round((1-cur/p.origPrice)*100)):0,
-    hasLink:!!p.coupangUrl, updatedAt:p.updatedAt
-  };
+    hasLink:!!p.coupangUrl, updatedAt:p.updatedAt };
 }
 
-// API
-app.get('/api/products', (req,res) =>
-  res.json(store.products.filter(p=>p.isActive)
-    .sort((a,b)=>a.category.localeCompare(b.category)||a.name.localeCompare(b.name))
-    .map(buildProduct)));
+app.get('/api/products',(_,res)=>res.json(store.products.filter(p=>p.isActive)
+  .sort((a,b)=>a.category.localeCompare(b.category)||a.name.localeCompare(b.name)).map(buildProduct)));
 
-app.get('/api/products/:id', (req,res) => {
-  const p = store.products.find(p=>p.id===req.params.id&&p.isActive);
-  return p ? res.json(buildProduct(p)) : res.status(404).json({error:'없음'});
+app.get('/api/products/:id',(req,res)=>{
+  const p=store.products.find(p=>p.id===req.params.id&&p.isActive);
+  p?res.json(buildProduct(p)):res.status(404).json({error:'없음'});
 });
 
-app.post('/api/preview-link', checkAdmin, async (req,res) => {
-  if (!req.body.url) return res.status(400).json({error:'URL 필요'});
-  try { res.json(await fetchCoupangInfo(req.body.url)); }
-  catch(e) { res.status(500).json({error:e.message}); }
+app.post('/api/preview-link',checkAdmin,async(req,res)=>{
+  if(!req.body.url) return res.status(400).json({error:'URL 필요'});
+  try{ res.json(await fetchCoupangInfo(req.body.url)); }
+  catch(e){ res.status(500).json({error:e.message}); }
 });
 
-app.post('/api/products', checkAdmin, async (req,res) => {
+app.post('/api/products',checkAdmin,async(req,res)=>{
   const {id,category,name,brand,weight,baseWeight,origPrice,coupangUrl,emoji}=req.body;
-  if (!category||!name) return res.status(400).json({error:'카테고리·상품명 필수'});
+  if(!category||!name) return res.status(400).json({error:'카테고리·상품명 필수'});
   const pid=id||uuidv4().split('-')[0];
   const idx=store.products.findIndex(p=>p.id===pid);
-  const product={ id:pid,category,name,brand:brand||'',weight:weight||'',
-    baseWeight:baseWeight||100,origPrice:origPrice||null,coupangUrl:coupangUrl||'',
-    imageUrl:'',emoji:emoji||'🥩',isActive:true,
-    createdAt:idx>=0?store.products[idx].createdAt:Date.now(),updatedAt:Date.now() };
-  if (idx>=0) store.products[idx]=product; else { store.products.push(product); store.priceHistory[pid]=[]; }
-  if (coupangUrl) {
-    try {
-      const info=await fetchCoupangInfo(coupangUrl);
-      if (info.price) { store.priceHistory[pid].push({price:info.price,ts:Date.now(),source:'manual'}); }
-      if (info.imageUrl) product.imageUrl=info.imageUrl;
-    } catch {}
-  }
+  const product={id:pid,category,name,brand:brand||'',weight:weight||'',baseWeight:baseWeight||100,
+    origPrice:origPrice||null,coupangUrl:coupangUrl||'',imageUrl:'',emoji:emoji||'🥩',isActive:true,
+    createdAt:idx>=0?store.products[idx].createdAt:Date.now(),updatedAt:Date.now()};
+  if(idx>=0) store.products[idx]=product; else{store.products.push(product);store.priceHistory[pid]=[];}
+  if(coupangUrl){try{const i=await fetchCoupangInfo(coupangUrl);if(i.price)store.priceHistory[pid].push({price:i.price,ts:Date.now(),source:'manual'});if(i.imageUrl)product.imageUrl=i.imageUrl;}catch{}}
   saveData(); res.json({success:true,id:pid});
 });
 
-app.patch('/api/products/:id', checkAdmin, async (req,res) => {
+app.patch('/api/products/:id',checkAdmin,async(req,res)=>{
   const p=store.products.find(p=>p.id===req.params.id);
-  if (!p) return res.status(404).json({error:'없음'});
+  if(!p) return res.status(404).json({error:'없음'});
   const {coupangUrl,manualPrice,origPrice,name,brand}=req.body;
-  if (coupangUrl!==undefined) p.coupangUrl=coupangUrl;
-  if (origPrice!==undefined)  p.origPrice=origPrice;
-  if (name!==undefined)       p.name=name;
-  if (brand!==undefined)      p.brand=brand;
-  if (manualPrice&&parseInt(manualPrice)>0) {
-    if (!store.priceHistory[p.id]) store.priceHistory[p.id]=[];
-    store.priceHistory[p.id].push({price:parseInt(manualPrice),ts:Date.now(),source:'manual'});
-  }
+  if(coupangUrl!==undefined)p.coupangUrl=coupangUrl;
+  if(origPrice!==undefined)p.origPrice=origPrice;
+  if(name!==undefined)p.name=name;
+  if(brand!==undefined)p.brand=brand;
+  if(manualPrice&&parseInt(manualPrice)>0){if(!store.priceHistory[p.id])store.priceHistory[p.id]=[];store.priceHistory[p.id].push({price:parseInt(manualPrice),ts:Date.now(),source:'manual'});}
   let fetchedPrice=null;
-  if (coupangUrl) {
-    try {
-      const info=await fetchCoupangInfo(coupangUrl);
-      if (info.price) { store.priceHistory[p.id].push({price:info.price,ts:Date.now(),source:'auto'}); fetchedPrice=info.price; }
-      if (info.imageUrl) p.imageUrl=info.imageUrl;
-    } catch {}
-  }
-  p.updatedAt=Date.now(); saveData(); res.json({success:true,fetchedPrice});
+  if(coupangUrl){try{const i=await fetchCoupangInfo(coupangUrl);if(i.price){store.priceHistory[p.id].push({price:i.price,ts:Date.now(),source:'auto'});fetchedPrice=i.price;}if(i.imageUrl)p.imageUrl=i.imageUrl;}catch{}}
+  p.updatedAt=Date.now();saveData();res.json({success:true,fetchedPrice});
 });
 
-app.delete('/api/products/:id', checkAdmin, (req,res) => {
+app.delete('/api/products/:id',checkAdmin,(req,res)=>{
   const p=store.products.find(p=>p.id===req.params.id);
-  if (p) { p.isActive=false; saveData(); }
-  res.json({success:true});
+  if(p){p.isActive=false;saveData();}res.json({success:true});
 });
 
-app.post('/api/update-prices', checkAdmin, (req,res) => {
-  res.json({success:true,message:'업데이트 시작'});
-  updateAllPrices('manual-admin');
+app.post('/api/update-prices',checkAdmin,(req,res)=>{
+  res.json({success:true});updateAllPrices('manual-admin');
 });
 
-app.get('/api/status', (req,res) => {
+app.get('/api/status',(_,res)=>{
   const logs=store.updateLog;
-  res.json({ lastUpdate:logs.length?logs[logs.length-1]:null,
+  res.json({lastUpdate:logs.length?logs[logs.length-1]:null,
     total:store.products.filter(p=>p.isActive).length,
-    linked:store.products.filter(p=>p.isActive&&p.coupangUrl).length });
+    linked:store.products.filter(p=>p.isActive&&p.coupangUrl).length});
 });
 
-// SEO
 app.get('/robots.txt',(_,res)=>res.type('text/plain').send(
   `User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${SITE_URL}/sitemap.xml`));
 app.get('/sitemap.xml',(_,res)=>{
   const now=new Date().toISOString().split('T')[0];
-  res.type('application/xml').send(
-    `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`+
-    `<url><loc>${SITE_URL}/</loc><lastmod>${now}</lastmod><changefreq>hourly</changefreq><priority>1.0</priority></url>`+
-    ['chicken','pork','beef','fish','eggs'].map(c=>
-      `<url><loc>${SITE_URL}/?cat=${c}</loc><lastmod>${now}</lastmod><changefreq>daily</changefreq><priority>0.8</priority></url>`
-    ).join('')+`</urlset>`);
+  res.type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${SITE_URL}/</loc><lastmod>${now}</lastmod><changefreq>hourly</changefreq><priority>1.0</priority></url>`+
+  ['chicken','pork','beef','fish','eggs'].map(c=>`<url><loc>${SITE_URL}/?cat=${c}</loc><lastmod>${now}</lastmod><changefreq>daily</changefreq><priority>0.8</priority></url>`).join('')+`</urlset>`);
 });
 
-// 시작
 loadData();
 seedDefaults();
-app.listen(PORT, () => {
+app.listen(PORT,()=>{
   console.log(`🥩 프로틴 트래커 → http://localhost:${PORT}`);
   console.log(`   어드민 키: ${ADMIN_KEY}`);
 });

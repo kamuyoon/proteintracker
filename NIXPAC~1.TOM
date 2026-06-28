@@ -1,0 +1,5 @@
+[phases.build]
+cmds = ["rm -rf node_modules", "npm install --prefer-offline=false"]
+
+[start]
+cmd = "node server.js"
