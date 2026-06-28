@@ -1,0 +1,19 @@
+# ─── 필수 설정 ─────────────────────────────────
+# 어드민 패널 접근 비밀번호 (반드시 복잡한 값으로 변경!)
+ADMIN_KEY=change-this-to-something-secret
+
+# 공개 URL (Google 색인, 사이트맵 생성에 사용)
+# 예: https://protein-tracker.up.railway.app
+SITE_URL=https://your-domain.railway.app
+
+# ─── 선택 설정 ─────────────────────────────────
+# 서버 포트 (Railway는 자동 설정)
+PORT=3000
+
+# DB 파일 위치 (Railway Volume 마운트 경로)
+# Railway에서 볼륨을 /data 에 마운트하면:
+# DB_PATH=/data/data.db
+DB_PATH=./data.db
+
+# Google Analytics ID (선택, SEO 분석용)
+# GA_ID=G-XXXXXXXXXX
