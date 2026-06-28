@@ -1,3 +1,8 @@
+// Node 18 + undici(cheerio 내장) 호환 패치 — 반드시 최상단
+if (typeof File === 'undefined') {
+  global.File = require('buffer').File;
+}
+
 // 프로틴 트래커 서버 — 오직 Node.js 내장 모듈만 사용
 const express     = require('express');
 const cheerio     = require('cheerio');
