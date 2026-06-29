@@ -113,6 +113,7 @@ async function fetchCoupangInfo(url) {
   const $ = cheerio.load(html);
   let price = null, name = null, imageUrl = null;
 
+  // 1. JSON-LD structured data
   $('script[type="application/ld+json"]').each((_, el) => {
     if (price) return;
     try {
@@ -120,22 +121,61 @@ async function fetchCoupangInfo(url) {
       items.forEach(item => {
         if (item['@type'] === 'Product') {
           if (item.offers?.price) price = parseInt(String(item.offers.price).replace(/[^0-9]/g,''));
+          if (item.offers?.lowPrice) price = price || parseInt(String(item.offers.lowPrice).replace(/[^0-9]/g,''));
           if (!name && item.name) name = item.name;
           if (!imageUrl) imageUrl = [].concat(item.image||[])[0];
         }
       });
     } catch {}
   });
+
+  // 2. meta 태그
   if (!price) { const v=$('meta[property="product:price:amount"]').attr('content'); if(v) price=parseInt(v.replace(/[^0-9]/g,'')); }
   if (!name)  name = ($('meta[property="og:title"]').attr('content')||$('title').text()||'').split(/[-–|]/)[0].trim();
   if (!imageUrl) imageUrl = $('meta[property="og:image"]').attr('content');
+
+  // 3. DOM 셀렉터 (쿠팡 공통)
   if (!price) {
-    for (const sel of ['.prod-price .total-price strong','#productPrice','.price-wrap strong']) {
+    const selectors = [
+      '.prod-price .total-price strong',
+      '.prod-price strong',
+      '#productPrice',
+      '.price-wrap strong',
+      '[class*="total-price"] strong',
+      '[class*="sale-price"]',
+      '.sale-price',
+      '.prod-sale-price strong',
+    ];
+    for (const sel of selectors) {
       const t=$(sel).first().text().replace(/[^0-9]/g,'');
-      if (t && parseInt(t)>100) { price=parseInt(t); break; }
+      if (t && parseInt(t)>100 && parseInt(t)<10000000) { price=parseInt(t); break; }
     }
   }
-  if (!price) { const m=html.match(/"price"\s*:\s*"?(\d{3,7})"?/); if(m) price=parseInt(m[1]); }
+
+  // 4. 스크립트 내 JSON 패턴 (쿠팡 상품 데이터)
+  if (!price) {
+    const patterns = [
+      /"salesPrice"\s*:\s*(\d{3,7})/,
+      /"finalPrice"\s*:\s*(\d{3,7})/,
+      /"discountedSalesPrice"\s*:\s*(\d{3,7})/,
+      /"unitPrice"\s*:\s*(\d{3,7})/,
+      /"basePrice"\s*:\s*(\d{3,7})/,
+      /"price"\s*:\s*"?(\d{3,7})"?/,
+      /\\"price\\":\s*(\d{3,7})/,
+      /"normalPrice"\s*:\s*(\d{3,7})/,
+    ];
+    for (const pat of patterns) {
+      const m = html.match(pat);
+      if (m && parseInt(m[1])>100) { price=parseInt(m[1]); break; }
+    }
+  }
+
+  // 5. 쿠팡 썸네일 CDN 이미지 추출 (og:image 실패시)
+  if (!imageUrl) {
+    const m = html.match(/https:\/\/thumbnail\d*\.coupangcdn\.com\/thumbnails\/[^\s"']+\.jpg/);
+    if (m) imageUrl = m[0];
+  }
+
   return { price, name: name?.substring(0,100), imageUrl, finalUrl };
 }
 
@@ -247,6 +287,18 @@ app.delete('/api/products/:id',checkAdmin,(req,res)=>{
 
 app.post('/api/update-prices',checkAdmin,(req,res)=>{
   res.json({success:true});updateAllPrices('manual-admin');
+});
+
+// 디버그: 쿠팡 파싱 결과 확인 (어드민 전용)
+app.post('/api/debug-fetch', checkAdmin, async (req,res)=>{
+  const {url}=req.body;
+  if(!url) return res.status(400).json({error:'URL 필요'});
+  try {
+    const {text:html, url:finalUrl} = await httpGet(url);
+    const snippet = html.substring(0,2000);
+    const hasPrice = /salesPrice|finalPrice|total-price|productPrice/.test(html);
+    res.json({finalUrl, htmlLength:html.length, hasPrice, snippet});
+  } catch(e){ res.status(500).json({error:e.message}); }
 });
 
 app.get('/api/status',(_,res)=>{
